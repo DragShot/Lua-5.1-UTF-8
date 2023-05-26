@@ -10,7 +10,7 @@ local error  = error;
 local ipairs = ipairs;
 local string = string;
 local table  = table;
-local unpack = unpack;
+local unpack = unpack or table.unpack;
 --
 -- Pattern that can be used with the string library to match a single UTF-8 byte-sequence.
 -- This expects the string to contain valid UTF-8 data.
@@ -92,8 +92,48 @@ local function char( ... )
 	return table.concat(buf, "");
 end
 --
+-- Returns an integer-representation of a single UTF-8 codepoint in a string, delimited by startPos and endPos.
+-- The delimited sequence must be valid, preferably one returned by utf8.decode().
+--
+local function cp_single(str, startPos, endPos)
+	-- Amount of bytes making up our sequence
+	local length = endPos - startPos + 1;
+	if length == 1 then -- Single-byte codepoint
+		return str:byte(startPos);
+	else -- Multi-byte codepoint
+		local b1 = str:byte(startPos);
+		local cp = 0;
+		for i = startPos + 1, endPos do
+			local bX = str:byte(i);
+			cp = bit.bor(bit.lshift(cp, 6), bit.band(bX, 0x3F));
+			b1 = bit.lshift(b1, 1);
+		end
+		cp = bit.bor(cp, bit.lshift(bit.band(b1, 0x7F), (length - 1) * 5));
+		return cp;
+	end
+end
+--
 -- Iterates over a UTF-8 string similarly to pairs
 -- k = index of sequence, v = string value of sequence
+--
+local function chars(str)
+	local i = 1;
+	return function()
+		-- Have we hit the end of the iteration set?
+		if i > #str then
+			return nil;
+		end
+		local startPos, endPos = decode(str, i);
+		if not startPos then
+			error("invalid UTF-8 code", 2);
+		end
+		i = endPos + 1;
+		return startPos, string.sub(str, startPos, endPos);
+	end
+end
+--
+-- Iterates over a UTF-8 string similarly to pairs
+-- k = index of sequence, v = codepoint of sequence
 --
 local function codes(str)
 	local i = 1;
@@ -107,7 +147,7 @@ local function codes(str)
 			error("invalid UTF-8 code", 2);
 		end
 		i = endPos + 1;
-		return startPos, str:sub(startPos, endPos);
+		return startPos, cp_single(str, startPos, endPos);
 	end
 end
 --
@@ -122,23 +162,9 @@ local function codepoint(str, startPos, endPos)
 		if not seqStartPos then
 			error("invalid UTF-8 code", 2);
 		end
+		table.insert(ret, cp_single(str, seqStartPos, seqEndPos));
 		-- Increment current string index
 		startPos = seqEndPos + 1;
-		-- Amount of bytes making up our sequence
-		local length = seqEndPos - seqStartPos + 1;
-		if length == 1 then -- Single-byte codepoint
-			table.insert(ret, str:byte(seqStartPos));
-		else -- Multi-byte codepoint
-			local b1 = str:byte(seqStartPos);
-			local cp = 0;
-			for i = seqStartPos + 1, seqEndPos do
-				local bX = str:byte(i);
-				cp = bit.bor(bit.lshift(cp, 6), bit.band(bX, 0x3F));
-				b1 = bit.lshift(b1, 1);
-			end
-			cp = bit.bor(cp, bit.lshift(bit.band(b1, 0x7F), (length - 1) * 5));
-			table.insert(ret, cp);
-		end
 	until seqEndPos >= endPos;
 	return unpack(ret);
 end
@@ -834,27 +860,6 @@ local function ustrRelToAbs(str, startPos, endPos)
 	return startPos, endPos;
 end
 --
--- Returns an integer-representation of a single UTF-8 codepoint in a string, delimited by startPos and endPos.
--- The delimited sequence must be valid, preferably one returned by utf8.decode().
---
-local function cp_single(str, startPos, endPos)
-	-- Amount of bytes making up our sequence
-	local length = endPos - startPos + 1;
-	if length == 1 then -- Single-byte codepoint
-		return str:byte(startPos);
-	else -- Multi-byte codepoint
-		local b1 = str:byte(startPos);
-		local cp = 0;
-		for i = startPos + 1, endPos do
-			local bX = str:byte(i);
-			cp = bit.bor(bit.lshift(cp, 6), bit.band(bX, 0x3F));
-			b1 = bit.lshift(b1, 1);
-		end
-		cp = bit.bor(cp, bit.lshift(bit.band(b1, 0x7F), (length - 1) * 5));
-		return cp;
-	end
-end
---
 -- Splits a string into many substrings by using the supplied separators.
 -- The separators are appended at the end of each substring.
 --
@@ -891,9 +896,9 @@ local function str_split(strng, ...)
 	return array;
 end
 --
--- Changes the casing of a single utf8 character, by using the given conversion table.
+-- Changes the casing of a single utf8 codepoint, by using the given conversion table.
 --
-local function convert_char(ch, tbl)
+local function convert_cp(ch, tbl)
 	local begin_, end_ = 1, #tbl;
 	while (begin_ < end_) do
 		local mid = math.floor((begin_ + end_) / 2);
@@ -922,7 +927,7 @@ local function convert_string(str, tbl)
 			curPos = curPos + 1;
 		else
 			local code = cp_single(str, seqStartPos, seqEndPos);
-			table.insert(buf, char(convert_char(code, tbl)));
+			table.insert(buf, char(convert_cp(code, tbl)));
 			curPos = seqEndPos + 1
 		end
 	until curPos > endPos
@@ -936,9 +941,11 @@ local function sub(str, startPos, endPos)
 	startPos, endPos = ustrRelToAbs(str, startPos, endPos or -1);
 	if (endPos < startPos) then return ""; end
 	local buf, pos = {}, 1;
-	for _, cp in codes(str) do
-		if(pos >= startPos and pos <= startPos) then
-			table.insert(buf, char(cp));
+	for _, ch in chars(str) do
+		if (pos > endPos) then
+			break;
+		elseif (pos >= startPos) then
+			table.insert(buf, ch);
 		end
 		pos = pos + 1;
 	end
@@ -968,7 +975,7 @@ local function title(str)
 			table.insert(buf, char(0xFFFD)..lower(string.sub(word, 2)));
 		else
 			local code = cp_single(word, seqStartPos, seqEndPos);
-			table.insert(buf, char(convert_char(code, totitle_table)));
+			table.insert(buf, char(convert_cp(code, totitle_table)));
 			if (seqEndPos < #word) then
 				table.insert(buf, lower(string.sub(word, seqEndPos + 1)));
 			end
@@ -980,6 +987,7 @@ end
 return {
 	['charpattern'] = charpattern,
 	['char'] = char,
+	['chars'] = chars,
 	['codes'] = codes,
 	['codepoint'] = codepoint,
 	['len'] = len,
